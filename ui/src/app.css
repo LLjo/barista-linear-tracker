@@ -1,0 +1,10 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; background: var(--panel); }
+body { color: var(--ink); font: var(--t-m)/1.45 var(--sans); -webkit-font-smoothing: antialiased; padding: 16px 20px; }
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+button { font: inherit; color: inherit; }
+input { font: inherit; color: var(--ink); background: var(--raised); border: 1px solid var(--line); border-radius: 8px; padding: 3px 8px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; height: 18px; border-radius: var(--r-pill); font-size: var(--t-xs); font-weight: 500; white-space: nowrap; }
+.chip.ok  { color: var(--work-fg); background: var(--work-bg); }
+.chip.bad { color: var(--fail-fg); background: var(--fail-bg); }

@@ -1,0 +1,20 @@
+{
+  "name": "@barista/plugin-linear-tracker",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "bun run --watch server/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc -p server/tsconfig.json",
+    "dev:ui": "cd ui && bunx vite",
+    "build:ui": "cd ui && bunx vite build",
+    "build": "bun run build:ui"
+  },
+  "dependencies": {
+    "hono": "4.12.9",
+    "zod": "^4.3.6",
+    "@hono/zod-validator": "^0.7.6",
+    "@barista/plugin-sdk": "file:../../shared/plugin-sdk",
+    "@barista/types": "file:../../shared/types"
+  }
+}
