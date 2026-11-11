@@ -19,6 +19,9 @@ export const CACHE_MS = 10 * 60_000;
 export const STATUS_CACHE_MS = 60_000;
 export const LIST_MAX = 50;
 export const COMMENTS_MAX = 50;
+/** One op's whole budget across its Linear requests: under the board's 15 s call timeout, so a slow Linear
+ *  fails the op here rather than leaving the board to give up while a write still lands. */
+export const OP_BUDGET_MS = 11_000;
 
 export interface TrackerDeps {
   gql: Gql;
@@ -37,7 +40,13 @@ const rejected = (w: WorkspacePublic) => `Linear rejected the key for ${w.name}.
 
 const CLOSED: ReadonlySet<StateType> = new Set(["completed", "canceled"]);
 
-interface Ctx { ws: WorkspacePublic; key: string; team: string | null; label: string | null }
+interface Ctx {
+  ws: WorkspacePublic; team: string | null; label: string | null;
+  /** A request to Linear with the workspace's key, within what is left of the op's budget. */
+  q<T>(query: string, variables?: Record<string, unknown>): Promise<T>;
+  /** Did Linear answer any request of this op? (Only then may a "rejected" mark be lifted.) */
+  reached: boolean;
+}
 type Brief = IssueNode & { state: { type: StateType } | null; team: { id: string } | null; parent: { id: string } | null };
 
 const linkOf = (n: IssueNode): TrackerLink => ({ id: n.id, ref: n.identifier, url: n.url });
@@ -68,7 +77,18 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
     if (!ws || !key) return trackerFail("unconfigured", `This project's Linear workspace has no key. ${NO_KEY}`);
     const team = config.team?.trim() || null;
     if (needTeam && !team) return trackerFail("unconfigured", PICK_TEAM);
-    return { ws, key, team, label: config.label?.trim() || null };
+    const started = Date.now();
+    const ctx: Ctx = {
+      ws, team, label: config.label?.trim() || null, reached: false,
+      q: async <T>(query: string, variables: Record<string, unknown> = {}) => {
+        const left = OP_BUDGET_MS - (Date.now() - started);
+        if (left < 500) throw new LinearError("network", "Linear did not answer in time");
+        const out = await d.gql<T>(key, query, variables, left);
+        ctx.reached = true;
+        return out;
+      },
+    };
+    return ctx;
   }
 
   /** Run `fn` with the project's context; a Linear failure becomes the contract's failure. */
@@ -77,7 +97,7 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
     if (isFail(c)) return c;
     try {
       const out = await fn(c);
-      if (c.ws.status === "rejected") d.setStatus(c.ws.id, "ok");
+      if (c.reached && c.ws.status === "rejected") d.setStatus(c.ws.id, "ok");
       return out;
     } catch (e) {
       return failure(e, c.ws);
@@ -90,6 +110,7 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
       case "auth":
         d.setStatus(ws.id, "rejected");
         return trackerFail("auth", rejected(ws));
+      case "forbidden": return trackerFail("auth", `${e.message}. The key for ${ws.name} needs write access to this team.`);
       case "rate": return trackerFail("rate_limited", e.message);
       case "not_found": return trackerFail("not_found", e.message);
       case "invalid": return trackerFail("invalid", e.message);
@@ -98,7 +119,7 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
   }
 
   const brief = async (c: Ctx, id: string): Promise<Brief> => {
-    const { issue } = await d.gql<{ issue: Brief | null }>(c.key, ISSUE_BRIEF, { id });
+    const { issue } = await c.q<{ issue: Brief | null }>(ISSUE_BRIEF, { id });
     if (!issue) throw new LinearError("not_found", "Linear has no such issue");
     return issue;
   };
@@ -106,9 +127,9 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
   async function teamStates(c: Ctx, teamId: string): Promise<WorkflowState[]> {
     const hit = states.get(teamId);
     if (hit && now() - hit.at < CACHE_MS) return hit.nodes;
-    const { team } = await d.gql<{ team: { states: { nodes: WorkflowState[] } } | null }>(c.key, TEAM_STATES, { id: teamId });
+    const { team } = await c.q<{ team: { states: { nodes: WorkflowState[] } } | null }>(TEAM_STATES, { id: teamId });
     const nodes = [...(team?.states.nodes ?? [])].sort((a, b) => a.position - b.position);
-    states.set(teamId, { at: now(), nodes });
+    if (nodes.length) states.set(teamId, { at: now(), nodes });
     return nodes;
   }
 
@@ -126,11 +147,11 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
     const k = `${teamId}\n${name.toLowerCase()}`;
     const hit = labels.get(k);
     if (hit && now() - hit.at < CACHE_MS) return hit.id;
-    const { issueLabels } = await d.gql<{ issueLabels: { nodes: { id: string; team: { id: string } | null }[] } }>(c.key, LABELS, { name });
+    const { issueLabels } = await c.q<{ issueLabels: { nodes: { id: string; team: { id: string } | null }[] } }>(LABELS, { name, team: teamId });
     const found = issueLabels.nodes.find((l) => l.team?.id === teamId) ?? issueLabels.nodes.find((l) => !l.team);
     let id = found?.id;
     if (!id) {
-      const r = await d.gql<{ issueLabelCreate: { success: boolean; issueLabel: { id: string } | null } }>(c.key, LABEL_CREATE, { input: { name, teamId } });
+      const r = await c.q<{ issueLabelCreate: { success: boolean; issueLabel: { id: string } | null } }>(LABEL_CREATE, { input: { name, teamId } });
       if (!r.issueLabelCreate.success || !r.issueLabelCreate.issueLabel) throw new LinearError("invalid", `Linear did not create the label "${name}"`);
       id = r.issueLabelCreate.issueLabel.id;
     }
@@ -139,7 +160,7 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
   }
 
   const update = async (c: Ctx, id: string, input: Record<string, unknown>): Promise<IssueNode> => {
-    const r = await d.gql<{ issueUpdate: { success: boolean; issue: IssueNode | null } }>(c.key, ISSUE_UPDATE, { id, input });
+    const r = await c.q<{ issueUpdate: { success: boolean; issue: IssueNode | null } }>(ISSUE_UPDATE, { id, input });
     if (!r.issueUpdate.success || !r.issueUpdate.issue) throw new LinearError("invalid", "Linear did not update the issue");
     return r.issueUpdate.issue;
   };
@@ -154,7 +175,7 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
       if (hit && now() - hit.at < STATUS_CACHE_MS && c.ws.status === "ok") return hit.answer;
       let answer: { ready: boolean; why?: string; settingsKey?: string };
       try {
-        const { team } = await d.gql<{ team: { id: string } | null }>(c.key, TEAM, { id: c.team });
+        const { team } = await c.q<{ team: { id: string } | null }>(TEAM, { id: c.team });
         answer = team ? { ready: true } : { ready: false, why: `The key for ${c.ws.name} cannot see this project's team. ${PICK_TEAM}` };
         if (c.ws.status === "rejected") d.setStatus(c.ws.id, "ok");
       } catch (e) {
@@ -172,7 +193,7 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
       if (field === "workspace") return { options: d.workspaces().map((w) => ({ value: w.id, label: w.name })) };
       if (field !== "team") return trackerFail("invalid", `The Linear tracker has no field "${field}"`);
       return withCtx(config, false, async (c) => {
-        const { teams } = await d.gql<{ teams: { nodes: { id: string; key: string; name: string }[] } }>(c.key, TEAMS);
+        const { teams } = await c.q<{ teams: { nodes: { id: string; key: string; name: string }[] } }>(TEAMS);
         return { options: teams.nodes.map((t) => ({ value: t.id, label: `${t.name} (${t.key})` })) };
       });
     },
@@ -182,7 +203,7 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
         const input: Record<string, unknown> = { teamId: c.team, title: item.title, description: item.body };
         if (parent) input.parentId = parent.id;
         if (c.label) input.labelIds = [await labelId(c, c.team!, c.label)];
-        const r = await d.gql<{ issueCreate: { success: boolean; issue: IssueNode | null } }>(c.key, ISSUE_CREATE, { input });
+        const r = await c.q<{ issueCreate: { success: boolean; issue: IssueNode | null } }>(ISSUE_CREATE, { input });
         if (!r.issueCreate.success || !r.issueCreate.issue) throw new LinearError("invalid", "Linear did not create the issue");
         return { link: linkOf(r.issueCreate.issue) };
       }),
@@ -240,15 +261,15 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
 
     listChildren: async ({ config, parent }) =>
       withCtx(config, false, async (c) => {
-        const { issue } = await d.gql<{ issue: { children: { nodes: IssueNode[] } } | null }>(c.key, CHILDREN, { id: parent.id });
+        const { issue } = await c.q<{ issue: { children: { nodes: IssueNode[] } } | null }>(CHILDREN, { id: parent.id });
         return { children: (issue?.children.nodes ?? []).map(rowOf) };
       }),
 
     getIssue: async ({ config, link, comments }) =>
       withCtx(config, false, async (c) => {
         type Comment = { body: string; createdAt: string; user: { name: string; displayName: string } | null; botActor: { name: string | null } | null };
-        const { issue } = await d.gql<{ issue: (IssueNode & { description: string | null; state: { type: StateType } | null; comments: { nodes: Comment[] } }) | null }>(
-          c.key, ISSUE_DETAIL, { id: link.id, comments: COMMENTS_MAX },
+        const { issue } = await c.q<{ issue: (IssueNode & { description: string | null; state: { type: StateType } | null; comments: { nodes: Comment[] } }) | null }>(
+          ISSUE_DETAIL, { id: link.id, comments: COMMENTS_MAX },
         );
         if (!issue) throw new LinearError("not_found", "Linear has no such issue");
         const out: { title: string; body: string; state: "open" | "closed"; comments?: { author: string; body: string }[] } = {
@@ -265,8 +286,8 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
     resolveRef: async ({ config, input }) =>
       withCtx(config, false, async (c) => {
         const ref = parseRef(input);
-        const shown = input.trim().slice(0, 80);
-        if (!ref) return trackerFail("not_found", `"${shown}" is not a Linear issue (like STA-42) or a linear.app issue link — nothing to adopt.`);
+        // The input is not repeated back: whatever was pasted (a key, by mistake) stays out of the answer.
+        if (!ref) return trackerFail("not_found", "That is not a Linear issue (like STA-42) or a linear.app issue link — nothing to adopt.");
         if (ref.urlKey && ref.urlKey !== c.ws.urlKey.toLowerCase()) {
           return trackerFail("not_found", `${ref.identifier} is in the Linear workspace "${ref.urlKey}", not this project's (${c.ws.urlKey}) — nothing to adopt.`);
         }
@@ -285,7 +306,7 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
         const q = typeof query === "string" ? query.trim() : "";
         if (q) filter.title = { containsIgnoreCase: q };
         const first = Math.max(1, Math.min(LIST_MAX, Number.isInteger(limit) && limit! > 0 ? limit! : LIST_MAX));
-        const { issues } = await d.gql<{ issues: { nodes: IssueNode[] } }>(c.key, OPEN_ISSUES, { first, filter });
+        const { issues } = await c.q<{ issues: { nodes: IssueNode[] } }>(OPEN_ISSUES, { first, filter });
         return { issues: issues.nodes.map(rowOf) };
       }),
 

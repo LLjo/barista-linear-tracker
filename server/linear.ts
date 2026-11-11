@@ -7,7 +7,7 @@
 export const LINEAR_GRAPHQL = "https://api.linear.app/graphql";
 export const REQUEST_TIMEOUT_MS = 15_000;
 
-export type LinearErrorKind = "auth" | "rate" | "not_found" | "invalid" | "network" | "http";
+export type LinearErrorKind = "auth" | "forbidden" | "rate" | "not_found" | "invalid" | "network" | "http";
 
 export class LinearError extends Error {
   constructor(readonly kind: LinearErrorKind, message: string) {
@@ -25,7 +25,7 @@ export const scrub = (text: string, key: string): string => (key && key.length >
 const kindOf = (status: number, errors: GqlError[]): LinearErrorKind | null => {
   const codes = errors.map((e) => `${e.extensions?.code ?? ""} ${e.extensions?.type ?? ""}`.toUpperCase());
   if (status === 401 || codes.some((c) => c.includes("AUTHENTICATION"))) return "auth";
-  if (status === 403 || codes.some((c) => c.includes("FORBIDDEN"))) return "auth";
+  if (status === 403 || codes.some((c) => c.includes("FORBIDDEN"))) return "forbidden";
   if (status === 429 || codes.some((c) => c.includes("RATELIMITED"))) return "rate";
   const text = errors.map((e) => e.message ?? "").join(" ");
   if (/entity not found|could not find/i.test(text)) return "not_found";
@@ -35,6 +35,7 @@ const kindOf = (status: number, errors: GqlError[]): LinearErrorKind | null => {
 
 const FIXED: Record<LinearErrorKind, string> = {
   auth: "Linear rejected the key",
+  forbidden: "Linear refused: the key may not do this",
   rate: "Linear's rate limit is reached; try again in a few minutes",
   not_found: "Linear has no such issue",
   invalid: "Linear refused the request",
@@ -42,21 +43,21 @@ const FIXED: Record<LinearErrorKind, string> = {
   http: "Linear answered with an error",
 };
 
-export type Gql = <T>(key: string, query: string, variables?: Record<string, unknown>) => Promise<T>;
+export type Gql = <T>(key: string, query: string, variables?: Record<string, unknown>, timeoutMs?: number) => Promise<T>;
 
 /** One GraphQL request. Personal API keys are sent bare (no `Bearer`). Throws a {@link LinearError}. */
-export const gql: Gql = async <T>(key: string, query: string, variables: Record<string, unknown> = {}): Promise<T> => {
+export const gql: Gql = async <T>(key: string, query: string, variables: Record<string, unknown> = {}, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> => {
   let res: Response;
   try {
     res = await fetch(LINEAR_GRAPHQL, {
       method: "POST",
       headers: { Authorization: key, "Content-Type": "application/json" },
       body: JSON.stringify({ query, variables }),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (e) {
     const timeout = e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
-    throw new LinearError("network", timeout ? `Linear did not answer within ${REQUEST_TIMEOUT_MS / 1000} s` : FIXED.network);
+    throw new LinearError("network", timeout ? "Linear did not answer in time" : FIXED.network);
   }
   let body: GqlBody<T> | null = null;
   try {
@@ -69,8 +70,8 @@ export const gql: Gql = async <T>(key: string, query: string, variables: Record<
   if (kind) {
     const e = errors.find((x) => typeof x.extensions?.userPresentableMessage === "string" || typeof x.message === "string");
     const said = e?.extensions?.userPresentableMessage ?? e?.message;
-    const msg = kind === "auth" || kind === "rate" || !said ? FIXED[kind] : `Linear: ${said}`;
-    throw new LinearError(kind, scrub(msg.slice(0, 300), key));
+    const msg = kind === "auth" || kind === "rate" || !said ? FIXED[kind] : `Linear: ${scrub(said, key)}`;
+    throw new LinearError(kind, msg.slice(0, 300));
   }
   return body!.data as T;
 };

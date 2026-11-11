@@ -16,8 +16,12 @@ export const TEAM_STATES = `query TeamStates($id: String!) {
   team(id: $id) { id states(first: 100) { nodes { id name type position } } }
 }`;
 
-export const LABELS = `query Labels($name: String!) {
-  issueLabels(first: 50, filter: { name: { eqIgnoreCase: $name } }) { nodes { id name team { id } } }
+/** A label of this name in the team, or a workspace label — never a label group. */
+export const LABELS = `query Labels($name: String!, $team: ID!) {
+  issueLabels(first: 50, filter: {
+    name: { eqIgnoreCase: $name }, isGroup: { eq: false },
+    or: [{ team: { id: { eq: $team } } }, { team: { null: true } }]
+  }) { nodes { id name team { id } } }
 }`;
 
 export const LABEL_CREATE = `mutation LabelCreate($input: IssueLabelCreateInput!) {

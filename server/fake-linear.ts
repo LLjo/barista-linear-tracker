@@ -63,7 +63,7 @@ export function fakeLinear(opts: { key?: string } = {}) {
         case Q.TEAMS: return { teams: { nodes: [TEAM, { id: "team-2", key: "OTH", name: "Other" }] } };
         case Q.TEAM: return { team: v.id === TEAM.id ? TEAM : null };
         case Q.TEAM_STATES: return { team: v.id === TEAM.id ? { id: TEAM.id, states: { nodes: STATES } } : null };
-        case Q.LABELS: return { issueLabels: { nodes: labels.filter((l) => l.name.toLowerCase() === String(v.name).toLowerCase()) } };
+        case Q.LABELS: return { issueLabels: { nodes: labels.filter((l) => l.name.toLowerCase() === String(v.name).toLowerCase() && (!l.team || l.team.id === v.team)) } };
         case Q.LABEL_CREATE: {
           const l = { id: `lab-${labels.length + 1}`, name: v.input.name, team: { id: v.input.teamId } };
           labels.push(l);

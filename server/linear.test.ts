@@ -36,6 +36,11 @@ describe("gql", () => {
     expect(e.message).toBe("Linear rejected the key");
   });
 
+  test("403 / FORBIDDEN → forbidden (not a bad key)", async () => {
+    answer({ errors: [{ message: "Forbidden", extensions: { code: "FORBIDDEN" } }] }, { status: 403 });
+    expect((await failure(gql(KEY, VIEWER))).kind).toBe("forbidden");
+  });
+
   test("RATELIMITED → rate", async () => {
     answer({ errors: [{ message: "slow down", extensions: { code: "RATELIMITED" } }] }, { status: 400 });
     expect((await failure(gql(KEY, VIEWER))).kind).toBe("rate");

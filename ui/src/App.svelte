@@ -81,7 +81,7 @@
 			<span class="sub">{sub(w)}</span>
 			<span class="side">
 				{#if w.status === "rejected"}<span class="chip bad">✕ key rejected</span>{:else}<span class="chip ok">✓ working</span>{/if}
-				<button type="button" onclick={() => { replacing = replacing === w.id ? null : w.id; replaceError = null; }}>Replace key</button>
+				<button type="button" onclick={() => { replacing = replacing === w.id ? null : w.id; replaceDraft = ""; replaceError = null; }}>Replace key</button>
 				<button type="button" onclick={() => remove(w)}>Remove</button>
 			</span>
 			{#if replacing === w.id}

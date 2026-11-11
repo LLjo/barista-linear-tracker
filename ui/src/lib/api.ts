@@ -6,6 +6,8 @@ export interface WorkspacePublic {
   status: "ok" | "rejected"; addedAt: string; checkedAt: string | null;
 }
 
+// Plain fetch with named types, not hc<AppType>: the typed client would drag the server modules (sqlite,
+// the key store) into the browser build. Every call goes through unwrap(): res.json() does not throw on a 4xx.
 const BASE = "/api/linear-tracker";
 const json = (method: string, body: unknown): RequestInit => ({
   method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { answerTracker, type TrackerAnswer, type TrackerLink, type TrackerOp } from "@barista/types/tracker";
 import { FAKE_KEY, fakeLinear, TEAM, WS } from "./fake-linear.js";
 import { LinearError } from "./linear.js";
-import { CACHE_MS, createHandlers, NO_KEY, parseRef, PICK, PICK_TEAM, SETTINGS_KEY } from "./tracker.js";
+import { CACHE_MS, createHandlers, NO_KEY, OP_BUDGET_MS, parseRef, PICK, PICK_TEAM, SETTINGS_KEY } from "./tracker.js";
 import type { WorkspacePublic } from "./workspaces.js";
 
 const project = { id: "p1", repoUrls: ["https://example.com/acme/app"], defaultBranch: "main" };
@@ -311,6 +311,40 @@ describe("failures", () => {
     });
     const a = await answerTracker(h, { op: "getIssue", project, config: CONFIG, link: { id: "x", ref: "TST-1", url: "" } });
     expect(JSON.stringify(a)).not.toContain(FAKE_KEY);
+  });
+
+  test("403 is not a bad key: the workspace stays ok and the sentence says write access", async () => {
+    const link = await create("x");
+    linear.failNext(new LinearError("forbidden", "Linear refused: the key may not do this"));
+    const a = await call("close", { link, reason: "completed" });
+    expect(a.ok ? null : [a.code, a.error]).toEqual(["auth", "Linear refused: the key may not do this. The key for Acme Test needs write access to this team."]);
+    expect(spaces[0]!.status).toBe("ok");
+  });
+
+  test("a rejected mark is lifted only when Linear actually answered", async () => {
+    spaces = [pub("rejected")];
+    await call("resolveRef", { input: "not a ref" });
+    expect(spaces[0]!.status).toBe("rejected");
+    await ok("listOpen");
+    expect(spaces[0]!.status).toBe("ok");
+  });
+
+  test("resolveRef never repeats what was pasted", async () => {
+    const pasted = ["lin", "api", "0".repeat(40)].join("_"); // built here so the secret scan does not flag it
+    const a = await call("resolveRef", { input: pasted });
+    expect(JSON.stringify(a)).not.toContain(pasted);
+  });
+
+  test("every request of an op shares one budget under the board's 15 s timeout", async () => {
+    const seen: number[] = [];
+    const h = createHandlers({
+      gql: (async (k: string, q: string, v?: Record<string, unknown>, t?: number) => { seen.push(t!); return linear.gql(k, q, v); }) as typeof linear.gql,
+      workspaces: () => spaces, workspace: () => spaces[0]!, keyOf: () => FAKE_KEY, setStatus: () => {},
+    });
+    await answerTracker(h, { op: "create", project, config: { ...CONFIG, label: "new-label" }, item: { kind: "issue", title: "t", body: "" } });
+    expect(seen).toHaveLength(3);
+    expect(Math.max(...seen)).toBeLessThanOrEqual(OP_BUDGET_MS);
+    expect(seen[2]!).toBeLessThanOrEqual(seen[0]!);
   });
 
   test("ops it does not offer answer unsupported (adopt, branchCut)", async () => {
