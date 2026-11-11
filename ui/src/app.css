@@ -3,7 +3,8 @@
    glows over --bg, fixed so a scrolled page keeps its light. --panel read as a grey slab. */
 html, body { margin: 0; min-height: 100%; }
 html { background: var(--bg); }
-body { background: var(--ground); background-attachment: fixed; }
+/* 100vh, not 100%: html has no height of its own, so % left a short page's foot on the flat --bg. */
+body { min-height: 100vh; background: var(--ground); background-attachment: fixed; }
 body { color: var(--ink); font: var(--t-m)/1.45 var(--sans); -webkit-font-smoothing: antialiased; padding: 16px 20px; }
 a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
