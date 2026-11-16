@@ -38,7 +38,7 @@ export const ISSUE_UPDATE = `mutation IssueUpdate($id: String!, $input: IssueUpd
 
 /** One issue by uuid or identifier (`STA-42`): what every lifecycle op needs to decide. */
 export const ISSUE_BRIEF = `query IssueBrief($id: String!) {
-  issue(id: $id) { ${ISSUE} state { type } team { id } parent { id } }
+  issue(id: $id) { ${ISSUE} state { type } team { id key } parent { id } }
 }`;
 
 export const ISSUE_DETAIL = `query IssueDetail($id: String!, $comments: Int!) {

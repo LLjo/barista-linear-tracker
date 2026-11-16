@@ -17,8 +17,26 @@ It needs a Barista with pluggable trackers (the `contributes.tracker` contract).
 
 1. In Linear, open **Settings → Security & access → Personal API keys** and create a key with **write** access.
 2. In Barista, open **Settings › Linear**, paste the key and press **Add**. Add one key per Linear workspace.
-3. In **Settings › Project**, choose **Linear** as the project's tracker, then pick the workspace and team
-   (and, optionally, a label to put on every issue Barista files; it is created in the team if it is missing).
+3. In **Settings › Project**, choose **Linear** as the project's tracker, then pick the workspace, the
+   **teams** the project works in (several, or **All teams**), the **default team** new items are filed in
+   (one of the selected teams), and optionally a label to put on every issue Barista files (it is created in
+   each team where it is missing).
+
+## Several teams
+
+A project can work in several Linear teams, or all of them:
+
+- **New items** are filed in the default team. Barista's composer has no team picker, so it is always the
+  default; to file in another team, change the default first.
+- **Sub-issues** of an epic go in their parent issue's team, as Linear requires. If Linear refuses (the key
+  cannot write to that team), the error names the team.
+- **Import and the open-issues list** take issues from every selected team. A ref from a team outside the
+  selection is refused with the team's key and where to add it.
+- **Close and reopen** use the issue's own team's workflow states.
+
+Leaving **Teams** empty means the default team only, which is how a project set up before this option keeps
+working unchanged. Picking teams needs a Barista whose project fields support `multiselect`; an older one
+does not show the Teams field, so the project stays on its one team.
 
 The key stays on the Barista host, in this plugin's own database (owner-only file). It is never shown again,
 never logged, never sent to the browser and never part of the board's project settings; only its last 4
@@ -28,21 +46,21 @@ characters are shown.
 
 | Barista | Linear |
 |---|---|
-| issue | an issue in the project's team |
+| issue | an issue in the project's default team |
 | epic | a parent issue, titled as the epic |
-| sub-issue | a child issue (`parentId`); link and unlink set or clear the parent |
+| sub-issue | a child issue (`parentId`) in its parent's team; link and unlink set or clear the parent |
 | ref / link | the issue identifier (`ENG-42`) and its URL |
 | item branch | the issue's `branchName` (Linear's "Copy git branch name") |
-| close (done / not planned) | the team's first *completed* / *canceled* state; an already closed issue is left alone |
-| reopen | the team's first *unstarted* state |
-| import | `ENG-42`, or a `linear.app/<workspace>/issue/ENG-42/…` link of the project's workspace |
+| close (done / not planned) | the issue's team's first *completed* / *canceled* state; an already closed issue is left alone |
+| reopen | the issue's team's first *unstarted* state |
+| import | `ENG-42`, or a `linear.app/<workspace>/issue/ENG-42/…` link of the project's workspace, from a selected team |
 
 Items keep Barista's own `#N` number for worktrees and lookups and show `ENG-42` wherever a ref is shown.
 If a branch with Linear's name already exists (for example you created it from Linear), Barista uses its own
 branch name for that item instead.
 
-Each operation costs one or two Linear requests (Linear allows 1500 an hour per key). Team workflow states and
-label ids are cached for 10 minutes. Nothing polls Linear: changes there are read only when Barista asks.
+Each operation costs one or two Linear requests (Linear allows 1500 an hour per key). Each team's workflow states
+and label ids are cached for 10 minutes. Nothing polls Linear: changes there are read only when Barista asks.
 
 Issue titles, descriptions and comments are written by people in your Linear workspace. Barista hands them to
 agents as the item's spec, so treat a Linear workspace you share with outsiders accordingly.
