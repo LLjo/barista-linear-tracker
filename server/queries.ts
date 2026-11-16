@@ -8,7 +8,7 @@ const ISSUE = "id identifier url title branchName";
 
 export const VIEWER = `query Viewer { viewer { id name organization { id name urlKey } } }`;
 
-export const TEAMS = `query Teams { teams(first: 100) { nodes { id key name } } }`;
+export const TEAMS = `query Teams { teams(first: 250) { nodes { id key name } } }`;
 
 export const TEAM = `query Team($id: String!) { team(id: $id) { id key name } }`;
 

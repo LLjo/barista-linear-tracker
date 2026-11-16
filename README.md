@@ -34,8 +34,9 @@ A project can work in several Linear teams, or all of them:
   selection is refused with the team's key and where to add it.
 - **Close and reopen** use the issue's own team's workflow states.
 
-Leaving **Teams** empty means the default team only, which is how a project set up before this option keeps
-working unchanged. Picking teams needs a Barista whose project fields support `multiselect`; an older one
+Leaving **Teams** empty keeps a project working as it did before this option: new items and the open-issues
+list use the default team, and import still takes an issue from any team. **All teams** wins over any team
+ticked beside it. Picking teams needs a Barista whose project fields support `multiselect`; an older one
 does not show the Teams field, so the project stays on its one team.
 
 The key stays on the Barista host, in this plugin's own database (owner-only file). It is never shown again,

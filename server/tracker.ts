@@ -59,6 +59,8 @@ const inScope = (s: Scope, teamId: string) => s.all || s.ids.includes(teamId);
 
 interface Ctx {
   ws: WorkspacePublic; team: string | null; label: string | null; scope: Scope;
+  /** Did the project pick teams? false = set up before multi-team selection: behaves as it did then. */
+  picked: boolean;
   /** A request to Linear with the workspace's key, within what is left of the op's budget. */
   q<T>(query: string, variables?: Record<string, unknown>): Promise<T>;
   /** Did Linear answer any request of this op? (Only then may a "rejected" mark be lifted.) */
@@ -96,7 +98,7 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
     if (needTeam && !team) return trackerFail("unconfigured", PICK_TEAM);
     const started = Date.now();
     const ctx: Ctx = {
-      ws, team, label: config.label?.trim() || null, scope: scopeOf(config), reached: false,
+      ws, team, label: config.label?.trim() || null, scope: scopeOf(config), picked: !!config.teams?.trim(), reached: false,
       q: async <T>(query: string, variables: Record<string, unknown> = {}) => {
         const left = OP_BUDGET_MS - (Date.now() - started);
         if (left < 500) throw new LinearError("network", "Linear did not answer in time");
@@ -194,17 +196,22 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
       if (hit && now() - hit.at < STATUS_CACHE_MS && c.ws.status === "ok") return hit.answer;
       let answer: { ready: boolean; why?: string; settingsKey?: string };
       try {
-        let seen: boolean;
+        let unseen: number;
         if (!others.length) {
           const { team } = await c.q<{ team: { id: string } | null }>(TEAM, { id: c.team });
-          seen = !!team;
+          unseen = team ? 0 : 1;
         } else {
           // Several teams: one list of every team the key sees, rather than a request per team.
           const { teams } = await c.q<{ teams: { nodes: { id: string }[] } }>(TEAMS);
           const ids = new Set(teams.nodes.map((t) => t.id));
-          seen = [c.team!, ...others].every((id) => ids.has(id));
+          unseen = [c.team!, ...others].filter((id) => !ids.has(id)).length;
         }
-        answer = seen ? { ready: true } : { ready: false, why: `The key for ${c.ws.name} cannot see ${others.length ? "every selected team" : "this project's team"}. ${PICK_TEAM}` };
+        answer = !unseen ? { ready: true } : {
+          ready: false,
+          why: others.length
+            ? `The key for ${c.ws.name} cannot see ${unseen} of the selected teams (deleted, private, or another workspace's). Untick them in Settings › Project.`
+            : `The key for ${c.ws.name} cannot see this project's team. ${PICK_TEAM}`,
+        };
         if (c.ws.status === "rejected") d.setStatus(c.ws.id, "ok");
       } catch (e) {
         const f = failure(e, c.ws);
@@ -233,10 +240,12 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
 
     create: async ({ config, item, parent }) =>
       withCtx(config, true, async (c) => {
+        if (!inScope(c.scope, c.team!)) return trackerFail("unconfigured", DEFAULT_OUTSIDE);
         // A sub-issue goes in its parent's team (Linear files children in their parent's team); else the default team.
         let teamId = c.team!, parentKey: string | null = null;
         // A single-team project's parents are all in that team: no request to ask.
-        const single = !c.scope.all && c.scope.ids.length === 1 && c.scope.ids[0] === teamId;
+        // (Only for a project that never picked teams: one that narrowed its selection may have parents elsewhere.)
+        const single = !c.picked;
         if (parent && !single) {
           const p = await brief(c, parent.id);
           if (p.team && p.team.id !== teamId) { teamId = p.team.id; parentKey = p.team.key; }
@@ -342,7 +351,8 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
         }
         try {
           const b = await brief(c, ref.identifier);
-          if (b.team && !inScope(c.scope, b.team.id)) {
+          // A project that never picked teams adopts from any team, as it always did.
+          if (c.picked && b.team && !inScope(c.scope, b.team.id)) {
             return trackerFail("not_found", `${ref.identifier} is in the Linear team ${b.team.key}, which this project has not selected. Add it in Settings › Project — nothing adopted.`);
           }
           return { link: linkOf(b), title: b.title };

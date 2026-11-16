@@ -75,12 +75,29 @@ describe("several teams", () => {
 
   test("a ref from a team outside the selection is refused, naming the team and where to add it", async () => {
     const c = linear.add({ title: "elsewhere", teamId: TEAM3.id });
-    for (const config of [TWO, CONFIG]) {
+    for (const config of [TWO, { ...TWO, teams: TEAM.id }]) {
       const r = await call("resolveRef", { input: c.identifier }, config);
       expect(r.ok).toBe(false);
       if (!r.ok) { expect(r.code).toBe("not_found"); expect(r.error).toContain(TEAM3.key); expect(r.error).toContain("Settings › Project"); }
     }
     expect((await ok("listOpen", {}, TWO)).issues).toEqual([]);
+  });
+
+  test("a project that never picked teams adopts from any team, as before", async () => {
+    const c = linear.add({ title: "elsewhere", teamId: TEAM3.id });
+    expect((await ok("resolveRef", { input: c.identifier }, CONFIG)).link.id).toBe(c.id);
+  });
+
+  test("a default outside the selection files nothing", async () => {
+    const r = await call("create", item("x"), { ...TWO, team: TEAM3.id });
+    expect(r.ok ? null : [r.code, r.error]).toEqual(["unconfigured", DEFAULT_OUTSIDE]);
+    expect(linear.issues.size).toBe(0);
+  });
+
+  test("a project narrowed to one team still files a sub-issue in its parent's team", async () => {
+    const parent = linear.add({ title: "their epic", teamId: TEAM2.id });
+    const link = (await ok("create", { item: { kind: "issue", title: "child", body: "" }, parent: { id: parent.id, ref: parent.identifier, url: "" } }, { ...TWO, teams: TEAM.id })).link;
+    expect(linear.find(link.id)!.teamId).toBe(TEAM2.id);
   });
 
   test("All teams: any team's ref is adopted, and listOpen has no team filter", async () => {
@@ -125,7 +142,9 @@ describe("several teams", () => {
     expect(await ok("status", {}, { ...TWO, team: TEAM3.id })).toEqual({ ok: true, ready: false, why: DEFAULT_OUTSIDE });
     expect(await ok("status", {}, TWO)).toEqual({ ok: true, ready: true });
     expect(linear.queries().at(-1)).toBe("Teams");
-    expect((await ok("status", {}, { ...TWO, teams: `${TEAM.id},team-unknown` })).ready).toBe(false);
+    const gone = await ok("status", {}, { ...TWO, teams: `${TEAM.id},team-unknown` });
+    expect(gone.ready).toBe(false);
+    expect(gone.why).toContain("cannot see 1 of the selected teams");
     expect(await ok("status", {}, ALL)).toEqual({ ok: true, ready: true });
   });
 
