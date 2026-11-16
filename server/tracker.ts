@@ -1,5 +1,7 @@
 /**
- * The tracker ops (#1541 design §1.4, §4): Barista items become Linear issues in the project's team, epics
+ * The tracker ops (#1541 design §1.4, §4): Barista items become Linear issues in the project's default team
+ * (`team`), within the teams it selected (`teams`: team ids joined by ",", "*" = every team, blank = only the
+ * default team, which is what a project set up before multi-team selection has). Epics
  * become parent issues, sub-issues are Linear children (`parentId`). Built from injected deps so tests run
  * without a database or a network. Every answer is either the op's data or a `TrackerFailure` whose
  * sentence names where to fix it — and none of them ever carries the key.
@@ -36,18 +38,35 @@ export interface TrackerDeps {
 export const NO_KEY = "Add a Linear API key with write access in Settings › Linear.";
 export const PICK = "Pick this project's Linear workspace and team in Settings › Project.";
 export const PICK_TEAM = "Pick this project's Linear team in Settings › Project.";
+export const DEFAULT_OUTSIDE = "The default team is not one of the selected teams. Pick a default among them in Settings › Project.";
+/** The `teams` value meaning every team the key can see. */
+export const ALL_TEAMS = "*";
 const rejected = (w: WorkspacePublic) => `Linear rejected the key for ${w.name}. Paste a new one in Settings › Linear.`;
 
 const CLOSED: ReadonlySet<StateType> = new Set(["completed", "canceled"]);
 
+/** The teams a project works in: every team, or these ids (the default team among them). */
+export type Scope = { all: true } | { all: false; ids: string[] };
+
+/** `teams` as saved (ids joined by ","; "*" = all) with the default team: blank `teams` = the default alone. */
+export function scopeOf(config: Record<string, string>): Scope {
+  const picked = [...new Set((config.teams ?? "").split(",").map((x) => x.trim()).filter(Boolean))];
+  if (picked.includes(ALL_TEAMS)) return { all: true };
+  const team = config.team?.trim();
+  return { all: false, ids: picked.length ? picked : team ? [team] : [] };
+}
+const inScope = (s: Scope, teamId: string) => s.all || s.ids.includes(teamId);
+
 interface Ctx {
-  ws: WorkspacePublic; team: string | null; label: string | null;
+  ws: WorkspacePublic; team: string | null; label: string | null; scope: Scope;
+  /** Did the project pick teams? false = set up before multi-team selection: behaves as it did then. */
+  picked: boolean;
   /** A request to Linear with the workspace's key, within what is left of the op's budget. */
   q<T>(query: string, variables?: Record<string, unknown>): Promise<T>;
   /** Did Linear answer any request of this op? (Only then may a "rejected" mark be lifted.) */
   reached: boolean;
 }
-type Brief = IssueNode & { state: { type: StateType } | null; team: { id: string } | null; parent: { id: string } | null };
+type Brief = IssueNode & { state: { type: StateType } | null; team: { id: string; key: string } | null; parent: { id: string } | null };
 
 const linkOf = (n: IssueNode): TrackerLink => ({ id: n.id, ref: n.identifier, url: n.url });
 const rowOf = (n: IssueNode): TrackerIssueRow => ({ ...linkOf(n), title: n.title });
@@ -79,7 +98,7 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
     if (needTeam && !team) return trackerFail("unconfigured", PICK_TEAM);
     const started = Date.now();
     const ctx: Ctx = {
-      ws, team, label: config.label?.trim() || null, reached: false,
+      ws, team, label: config.label?.trim() || null, scope: scopeOf(config), picked: !!config.teams?.trim(), reached: false,
       q: async <T>(query: string, variables: Record<string, unknown> = {}) => {
         const left = OP_BUDGET_MS - (Date.now() - started);
         if (left < 500) throw new LinearError("network", "Linear did not answer in time");
@@ -170,13 +189,29 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
       if (!d.workspaces().length) return { ready: false, why: NO_KEY, settingsKey: SETTINGS_KEY };
       const c = ctxOf(config, true);
       if (isFail(c)) return { ready: false, why: c.error, ...(c.error === PICK || c.error === PICK_TEAM ? {} : { settingsKey: SETTINGS_KEY }) };
-      const k = `${c.ws.id}\n${c.team}\n${c.ws.keyLast4}`; // a new key is checked afresh
+      if (!inScope(c.scope, c.team!)) return { ready: false, why: DEFAULT_OUTSIDE };
+      const others = c.scope.all ? [] : c.scope.ids.filter((id) => id !== c.team);
+      const k = `${c.ws.id}\n${c.team}\n${others.join(",")}\n${c.ws.keyLast4}`; // a new key is checked afresh
       const hit = checked.get(k);
       if (hit && now() - hit.at < STATUS_CACHE_MS && c.ws.status === "ok") return hit.answer;
       let answer: { ready: boolean; why?: string; settingsKey?: string };
       try {
-        const { team } = await c.q<{ team: { id: string } | null }>(TEAM, { id: c.team });
-        answer = team ? { ready: true } : { ready: false, why: `The key for ${c.ws.name} cannot see this project's team. ${PICK_TEAM}` };
+        let unseen: number;
+        if (!others.length) {
+          const { team } = await c.q<{ team: { id: string } | null }>(TEAM, { id: c.team });
+          unseen = team ? 0 : 1;
+        } else {
+          // Several teams: one list of every team the key sees, rather than a request per team.
+          const { teams } = await c.q<{ teams: { nodes: { id: string }[] } }>(TEAMS);
+          const ids = new Set(teams.nodes.map((t) => t.id));
+          unseen = [c.team!, ...others].filter((id) => !ids.has(id)).length;
+        }
+        answer = !unseen ? { ready: true } : {
+          ready: false,
+          why: others.length
+            ? `The key for ${c.ws.name} cannot see ${unseen} of the selected teams (deleted, private, or another workspace's). Untick them in Settings › Project.`
+            : `The key for ${c.ws.name} cannot see this project's team. ${PICK_TEAM}`,
+        };
         if (c.ws.status === "rejected") d.setStatus(c.ws.id, "ok");
       } catch (e) {
         const f = failure(e, c.ws);
@@ -191,19 +226,42 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
 
     options: async ({ config, field }) => {
       if (field === "workspace") return { options: d.workspaces().map((w) => ({ value: w.id, label: w.name })) };
-      if (field !== "team") return trackerFail("invalid", `The Linear tracker has no field "${field}"`);
+      if (field !== "team" && field !== "teams") return trackerFail("invalid", `The Linear tracker has no field "${field}"`);
       return withCtx(config, false, async (c) => {
         const { teams } = await c.q<{ teams: { nodes: { id: string; key: string; name: string }[] } }>(TEAMS);
-        return { options: teams.nodes.map((t) => ({ value: t.id, label: `${t.name} (${t.key})` })) };
+        const all = teams.nodes.map((t) => ({ value: t.id, label: `${t.name} (${t.key})` }));
+        if (field === "teams") return { options: [{ value: ALL_TEAMS, label: "All teams" }, ...all] };
+        // The default team is one of the selected teams; with none selected (or all), any team.
+        const picked = (config.teams ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+        const s = scopeOf(config);
+        return { options: s.all || !picked.length ? all : all.filter((o) => inScope(s, o.value)) };
       });
     },
 
     create: async ({ config, item, parent }) =>
       withCtx(config, true, async (c) => {
-        const input: Record<string, unknown> = { teamId: c.team, title: item.title, description: item.body };
+        if (!inScope(c.scope, c.team!)) return trackerFail("unconfigured", DEFAULT_OUTSIDE);
+        // A sub-issue goes in its parent's team (Linear files children in their parent's team); else the default team.
+        let teamId = c.team!, parentKey: string | null = null;
+        // A single-team project's parents are all in that team: no request to ask.
+        // (Only for a project that never picked teams: one that narrowed its selection may have parents elsewhere.)
+        const single = !c.picked;
+        if (parent && !single) {
+          const p = await brief(c, parent.id);
+          if (p.team && p.team.id !== teamId) { teamId = p.team.id; parentKey = p.team.key; }
+        }
+        const input: Record<string, unknown> = { teamId, title: item.title, description: item.body };
         if (parent) input.parentId = parent.id;
-        if (c.label) input.labelIds = [await labelId(c, c.team!, c.label)];
-        const r = await c.q<{ issueCreate: { success: boolean; issue: IssueNode | null } }>(ISSUE_CREATE, { input });
+        if (c.label) input.labelIds = [await labelId(c, teamId, c.label)];
+        let r: { issueCreate: { success: boolean; issue: IssueNode | null } };
+        try {
+          r = await c.q(ISSUE_CREATE, { input });
+        } catch (e) {
+          if (parentKey && e instanceof LinearError && (e.kind === "invalid" || e.kind === "forbidden")) {
+            throw new LinearError(e.kind, `Linear refused the sub-issue in its parent's team ${parentKey} (${e.message}). The key needs write access to ${parentKey}`);
+          }
+          throw e;
+        }
         if (!r.issueCreate.success || !r.issueCreate.issue) throw new LinearError("invalid", "Linear did not create the issue");
         return { link: linkOf(r.issueCreate.issue) };
       }),
@@ -293,6 +351,10 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
         }
         try {
           const b = await brief(c, ref.identifier);
+          // A project that never picked teams adopts from any team, as it always did.
+          if (c.picked && b.team && !inScope(c.scope, b.team.id)) {
+            return trackerFail("not_found", `${ref.identifier} is in the Linear team ${b.team.key}, which this project has not selected. Add it in Settings › Project — nothing adopted.`);
+          }
           return { link: linkOf(b), title: b.title };
         } catch (e) {
           if (e instanceof LinearError && e.kind === "not_found") return trackerFail("not_found", `${ref.identifier} is not an issue in ${c.ws.name} — nothing to adopt.`);
@@ -302,7 +364,8 @@ export function createHandlers(d: TrackerDeps): TrackerHandlers {
 
     listOpen: async ({ config, query, limit }) =>
       withCtx(config, true, async (c) => {
-        const filter: Record<string, unknown> = { team: { id: { eq: c.team } }, state: { type: { nin: [...CLOSED] } } };
+        const filter: Record<string, unknown> = { state: { type: { nin: [...CLOSED] } } };
+        if (!c.scope.all) filter.team = c.scope.ids.length === 1 ? { id: { eq: c.scope.ids[0] } } : { id: { in: c.scope.ids } };
         const q = typeof query === "string" ? query.trim() : "";
         if (q) filter.title = { containsIgnoreCase: q };
         const first = Math.max(1, Math.min(LIST_MAX, Number.isInteger(limit) && limit! > 0 ? limit! : LIST_MAX));

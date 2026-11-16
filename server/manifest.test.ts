@@ -13,8 +13,10 @@ describe("manifest", () => {
       epics: true, subIssues: true, numbering: "barista", branchNames: true, remoteBranch: false,
       import: true, listOpen: true, comments: true, reopen: true,
     });
-    expect(t.projectFields.map((f) => f.key)).toEqual(["workspace", "team", "label"]);
-    expect(t.projectFields[1]).toMatchObject({ options: "dynamic", required: true, dependsOn: "workspace" });
+    expect(t.projectFields.map((f) => f.key)).toEqual(["workspace", "teams", "team", "label"]);
+    expect(t.projectFields[1]).toMatchObject({ kind: "multiselect", options: "dynamic", dependsOn: "workspace" });
+    expect(t.projectFields[1]!.required).toBeUndefined(); // blank = the default team only (single-team projects)
+    expect(t.projectFields[2]).toMatchObject({ kind: "select", options: "dynamic", required: true, dependsOn: "workspace" });
   });
 
   test("its Settings section is the key `status` points at", () => {

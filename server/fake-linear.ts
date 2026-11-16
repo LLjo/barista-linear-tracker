@@ -9,6 +9,11 @@ import type { WorkflowState } from "./queries.js";
 export const FAKE_KEY = "fake-linear-key-for-tests-0123456789abcd";
 export const WS = { id: "org-1", name: "Acme Test", urlKey: "acme-test" };
 export const TEAM = { id: "team-1", key: "TST", name: "Throwaway" };
+export const TEAM2 = { id: "team-2", key: "OTH", name: "Other" };
+/** A team the key sees but no test project selects. */
+export const TEAM3 = { id: "team-3", key: "THR", name: "Third" };
+const TEAMS = [TEAM, TEAM2, TEAM3];
+const teamOf = (id: unknown) => TEAMS.find((t) => t.id === id) ?? null;
 
 export interface FakeIssue {
   id: string; identifier: string; number: number; title: string; description: string;
@@ -25,6 +30,10 @@ export const STATES: WorkflowState[] = [
   { id: "st-cancel", name: "Canceled", type: "canceled", position: 4 },
 ];
 
+/** Team 2's own workflow states: same types, its own ids, so a test sees which team's states were used. */
+export const STATES2: WorkflowState[] = STATES.map((s) => ({ ...s, id: `${s.id}-2` }));
+const statesOf = (teamId: string) => (teamId === TEAM.id ? STATES : STATES2);
+
 export function fakeLinear(opts: { key?: string } = {}) {
   const key = opts.key ?? FAKE_KEY;
   const issues = new Map<string, FakeIssue>();
@@ -39,13 +48,14 @@ export function fakeLinear(opts: { key?: string } = {}) {
     id: i.id, identifier: i.identifier, url: `https://linear.app/${WS.urlKey}/issue/${i.identifier}/${slug(i.title)}`,
     title: i.title, branchName: `tester/${i.identifier.toLowerCase()}-${slug(i.title)}`,
   });
-  const stateType = (i: FakeIssue) => STATES.find((s) => s.id === i.stateId)!.type;
+  const stateType = (i: FakeIssue) => statesOf(i.teamId).find((s) => s.id === i.stateId)!.type;
   const notFound = () => new LinearError("not_found", "Linear: Entity not found: Issue");
 
   const add = (o: Partial<FakeIssue> & { title: string }): FakeIssue => {
     const n = ++seq;
+    const teamId = o.teamId ?? TEAM.id;
     const i: FakeIssue = {
-      id: `uuid-${n}`, identifier: `${TEAM.key}-${n}`, number: n, description: "", stateId: "st-todo", teamId: TEAM.id,
+      id: `uuid-${n}`, identifier: `${teamOf(teamId)!.key}-${n}`, number: n, description: "", stateId: teamId === TEAM.id ? "st-todo" : "st-todo-2", teamId,
       parentId: null, labelIds: [], comments: [], ...o,
     };
     issues.set(i.id, i);
@@ -60,9 +70,9 @@ export function fakeLinear(opts: { key?: string } = {}) {
     const out = ((): unknown => {
       switch (query) {
         case Q.VIEWER: return { viewer: { id: "user-1", name: "Test Person", organization: WS } };
-        case Q.TEAMS: return { teams: { nodes: [TEAM, { id: "team-2", key: "OTH", name: "Other" }] } };
-        case Q.TEAM: return { team: v.id === TEAM.id ? TEAM : null };
-        case Q.TEAM_STATES: return { team: v.id === TEAM.id ? { id: TEAM.id, states: { nodes: STATES } } : null };
+        case Q.TEAMS: return { teams: { nodes: TEAMS } };
+        case Q.TEAM: return { team: teamOf(v.id) };
+        case Q.TEAM_STATES: return { team: teamOf(v.id) ? { id: v.id, states: { nodes: statesOf(v.id) } } : null };
         case Q.LABELS: return { issueLabels: { nodes: labels.filter((l) => l.name.toLowerCase() === String(v.name).toLowerCase() && (!l.team || l.team.id === v.team)) } };
         case Q.LABEL_CREATE: {
           const l = { id: `lab-${labels.length + 1}`, name: v.input.name, team: { id: v.input.teamId } };
@@ -71,9 +81,11 @@ export function fakeLinear(opts: { key?: string } = {}) {
         }
         case Q.ISSUE_CREATE: {
           const { teamId, title, description, parentId, labelIds } = v.input;
-          if (teamId !== TEAM.id) throw new LinearError("invalid", "Linear: Argument Validation Error");
-          if (parentId && !find(parentId)) throw notFound();
-          const i = add({ title, description: description ?? "", parentId: parentId ?? null, labelIds: labelIds ?? [] });
+          if (!teamOf(teamId)) throw new LinearError("invalid", "Linear: Argument Validation Error");
+          const p = parentId ? find(parentId) : null;
+          if (parentId && !p) throw notFound();
+          if (p && p.teamId !== teamId) throw new LinearError("invalid", "Linear: Parent issue must be in the same team");
+          const i = add({ title, teamId, description: description ?? "", parentId: parentId ?? null, labelIds: labelIds ?? [] });
           return { issueCreate: { success: true, issue: node(i) } };
         }
         case Q.ISSUE_UPDATE: {
@@ -89,7 +101,7 @@ export function fakeLinear(opts: { key?: string } = {}) {
         case Q.ISSUE_BRIEF: {
           const i = find(v.id);
           if (!i) throw notFound();
-          return { issue: { ...node(i), state: { type: stateType(i) }, team: { id: i.teamId }, parent: i.parentId ? { id: i.parentId } : null } };
+          return { issue: { ...node(i), state: { type: stateType(i) }, team: { id: i.teamId, key: teamOf(i.teamId)!.key }, parent: i.parentId ? { id: i.parentId } : null } };
         }
         case Q.ISSUE_DETAIL: {
           const i = find(v.id);
@@ -106,7 +118,7 @@ export function fakeLinear(opts: { key?: string } = {}) {
           const nin: string[] = f.state.type.nin;
           const q: string | undefined = f.title?.containsIgnoreCase;
           const rows = [...issues.values()]
-            .filter((i) => i.teamId === f.team.id.eq && !nin.includes(stateType(i)) && (!q || i.title.toLowerCase().includes(q.toLowerCase())))
+            .filter((i) => (!f.team || (f.team.id.in ? f.team.id.in.includes(i.teamId) : i.teamId === f.team.id.eq)) && !nin.includes(stateType(i)) && (!q || i.title.toLowerCase().includes(q.toLowerCase())))
             .reverse().slice(0, v.first);
           return { issues: { nodes: rows.map(node) } };
         }
